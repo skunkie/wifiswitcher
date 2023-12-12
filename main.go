@@ -1,110 +1,71 @@
 package main
 
 import (
+	"embed"
 	"flag"
-	"fmt"
 	"log"
 	"os"
 
-	"github.com/lxn/walk"
-	d "github.com/lxn/walk/declarative"
-	"golang.org/x/crypto/ssh"
-	"gopkg.in/yaml.v2"
+	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/options"
+	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"gopkg.in/yaml.v3"
 )
 
-type config struct {
-	Host     string `yaml:"host"`
-	Port     uint   `yaml:"port"`
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
-}
+const appName = "wifiswitcher"
 
-var c = &config{}
-
-var logger *log.Logger
-
-func exec(cmd string) {
-	clientConfig := &ssh.ClientConfig{
-		User: c.Username,
-		Auth: []ssh.AuthMethod{
-			ssh.Password(c.Password),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", c.Host, c.Port), clientConfig)
-	if err != nil {
-		logger.Printf("failed to dial, %s\n", err)
-	}
-	session, err := client.NewSession()
-	if err != nil {
-		logger.Printf("failed to create session, %s\n", err)
-	}
-	defer session.Close()
-
-	if err := session.Run(cmd); err != nil {
-		logger.Printf("failed to run command %q, %s\n", cmd, err.Error())
-	}
-}
+//go:embed all:frontend/dist
+var assets embed.FS
 
 func main() {
-
-	logFile, err := os.OpenFile("wifiswitcher.log",
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Println(err)
-	}
-	defer logFile.Close()
-	logger = log.New(logFile, "", log.LstdFlags)
-
-	configFilepath := flag.String("c", "config.yml", "Path to config file")
-	logVersion := flag.Bool("v", false, "Write version and commit to log file and exit")
+	var (
+		cfgFilePath = flag.String("c", "config.yml", "Path to config file")
+		logFilePath = flag.String("l", "wifiswitcher.log", "Path to log file")
+	)
 	flag.Parse()
 
-	if *logVersion {
-		logger.Printf("Version: %s, Commit: %s\n", version, commit)
-		os.Exit(0)
-	}
-
-	configFile, err := os.Open(*configFilepath)
+	cfgFile, err := os.Open(*cfgFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			logger.Fatalf("create a config file %q\n", *configFilepath)
+			log.Fatalf("create a config file %q\n", *cfgFilePath)
 		}
-		logger.Fatalf("error while reading the config file %q, %s\n", *configFilepath, err)
+		log.Fatalf("error while reading the config file %q, %s\n", *cfgFilePath, err)
 	}
-	defer configFile.Close()
+	defer cfgFile.Close()
 
-	if err := yaml.NewDecoder(configFile).Decode(c); err != nil {
+	logFile, err := os.OpenFile(*logFilePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		log.Fatalf("error while opening the log file %q, %s\n", *logFilePath, err)
+	}
+	defer logFile.Close()
+
+	logger := log.New(logFile, appName+": ", log.LstdFlags)
+
+	var cfg config
+
+	if err := yaml.NewDecoder(cfgFile).Decode(&cfg); err != nil {
 		logger.Fatal(err)
 	}
 
-	icon, err := walk.NewIconFromResource("#2")
-	if err != nil {
-		log.Fatal(err)
-	}
+	// Create an instance of the app structure
+	app := NewApp(cfg, logger)
 
-	d.MainWindow{
-		Icon:   icon,
+	// Create application with options
+	err = wails.Run(&options.App{
 		Title:  "OpenWrt WiFi Switcher",
-		Size:   d.Size{Width: 300, Height: 180},
-		Layout: d.VBox{},
-		Children: []d.Widget{
-			d.HSplitter{
-				Children: []d.Widget{
-					d.PushButton{
-						Text: "UP",
-						OnClicked: func() {
-							exec("/sbin/wifi up")
-						},
-					},
-					d.PushButton{
-						Text: "DOWN",
-						OnClicked: func() {
-							exec("/sbin/wifi down")
-						},
-					},
-				},
-			},
+		Width:  300,
+		Height: 120,
+		AssetServer: &assetserver.Options{
+			Assets: assets,
 		},
-	}.Run()
+		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 255},
+		OnStartup:        app.startup,
+		Bind: []interface{}{
+			app,
+		},
+	})
+
+	if err != nil {
+		logger.Fatal(err)
+	}
 }
